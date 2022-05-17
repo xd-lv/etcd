@@ -44,6 +44,7 @@ func newKVStore(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <
 	if err != nil {
 		log.Panic(err)
 	}
+	// 我猜测看下raft里有没有的旧的信息，如果有，先从snapshot中读出来
 	if snapshot != nil {
 		log.Printf("loading snapshot at term %d and index %d", snapshot.Metadata.Term, snapshot.Metadata.Index)
 		if err := s.recoverFromSnapshot(snapshot.Data); err != nil {
@@ -51,11 +52,15 @@ func newKVStore(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <
 		}
 	}
 	// read commits from raft into kvStore map until error
+	// 这个是实际上监听commit中来自raft的信息的routine
 	go s.readCommits(commitC, errorC)
 	return s
 }
 
+// 这个大写开头的方法，都是处理http请求用的
+
 func (s *kvstore) Lookup(key string) (string, bool) {
+	// 通过key查询value
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	v, ok := s.kvStore[key]
@@ -63,14 +68,20 @@ func (s *kvstore) Lookup(key string) (string, bool) {
 }
 
 func (s *kvstore) Propose(k string, v string) {
+	// 处理http 的put方法
+	// 读取待保存的kv对
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(kv{k, v}); err != nil {
 		log.Fatal(err)
 	}
+	// 将kv对防区proposeC chan中，这时候raft已经在监听proposeC了
 	s.proposeC <- buf.String()
 }
 
 func (s *kvstore) readCommits(commitC <-chan *commit, errorC <-chan error) {
+	// Golang 使用for range 从chan中读数据
+	// commitC 是 raft 返回信息用的chan
+
 	for commit := range commitC {
 		if commit == nil {
 			// signaled to load snapshot

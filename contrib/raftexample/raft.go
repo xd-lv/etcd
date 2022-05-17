@@ -86,7 +86,10 @@ var defaultSnapshotCount uint64 = 10000
 // current), then new log entries. To shutdown, close proposeC and read errorC.
 func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, error), proposeC <-chan string,
 	confChangeC <-chan raftpb.ConfChange) (<-chan *commit, <-chan error, <-chan *snap.Snapshotter) {
+	// proposeC 是一个 <-chan 是什么意思呢？ 是一个接收chan，用于接收数据
+	// confChangeC 同理
 
+	// 创作用作返回值的两个chan
 	commitC := make(chan *commit)
 	errorC := make(chan error)
 
@@ -111,7 +114,10 @@ func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, 
 		snapshotterReady: make(chan *snap.Snapshotter, 1),
 		// rest of structure populated after WAL replay
 	}
+
+	// 开启一个新的routine来运行这个raftnode
 	go rc.startRaft()
+	// 将两个返回给http api的通道返回给客户端，让客户端监听
 	return commitC, errorC, rc.snapshotterReady
 }
 

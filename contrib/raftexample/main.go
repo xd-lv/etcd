@@ -28,16 +28,22 @@ func main() {
 	join := flag.Bool("join", false, "join an existing cluster")
 	flag.Parse()
 
+	// 这个chan是传递写日志信息用的
 	proposeC := make(chan string)
 	defer close(proposeC)
+	// 用于raft这是信息修改
 	confChangeC := make(chan raftpb.ConfChange)
 	defer close(confChangeC)
 
 	// raft provides a commit stream for the proposals from the http api
 	var kvs *kvstore
 	getSnapshot := func() ([]byte, error) { return kvs.getSnapshot() }
+	// newRaftNode 从名字来看，是创建了一个新的Raft node，自然要知道和这个node通信的chan，所以返回前两者
+	// snapshotterReady
+	// 传入参数 getSnapshot 是让node从http api中拿kv数据
 	commitC, errorC, snapshotterReady := newRaftNode(*id, strings.Split(*cluster, ","), *join, getSnapshot, proposeC, confChangeC)
 
+	// 拿到raft返回信息的commitC和errorC chan后，监听这两个chan
 	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
 
 	// the key-value http handler will propose updates to raft
