@@ -44,32 +44,43 @@ type commit struct {
 
 // A key-value stream backed by raft
 type raftNode struct {
+	// 接收信息的chan
 	proposeC    <-chan string            // proposed messages (k,v)
 	confChangeC <-chan raftpb.ConfChange // proposed cluster config changes
-	commitC     chan<- *commit           // entries committed to log (k,v)
-	errorC      chan<- error             // errors from raft session
+	// 返回信息的chan
+	commitC chan<- *commit // entries committed to log (k,v)
+	errorC  chan<- error   // errors from raft session
 
-	id          int      // client ID for raft session
-	peers       []string // raft peer URLs
-	join        bool     // node is joining an existing cluster
-	waldir      string   // path to WAL directory
-	snapdir     string   // path to snapshot directory
+	id int // client ID for raft session
+	// cluster中其他node
+	peers []string // raft peer URLs
+	// 是否是假如到已有的cluster中（可能会涉及初始or创建cluster的操作
+	join bool // node is joining an existing cluster
+	// TODO: WAL和snapdir还没懂
+	waldir  string // path to WAL directory
+	snapdir string // path to snapshot directory
+	// 从应用层拿snapshot（也就是是kvstore中），可能是开始的时候就有数据？
 	getSnapshot func() ([]byte, error)
 
-	confState     raftpb.ConfState
+	confState raftpb.ConfState
+	// 这两个index应该适用于raft的状态机部分？
 	snapshotIndex uint64
 	appliedIndex  uint64
 
 	// raft backing for the commit/error channel
+	// raftStorage 是在内存中的storage
+	// node是raft中的node
+	// TODO：wal不知道是干啥的
 	node        raft.Node
 	raftStorage *raft.MemoryStorage
 	wal         *wal.WAL
-
+	// TODO 不知道干啥的
 	snapshotter      *snap.Snapshotter
 	snapshotterReady chan *snap.Snapshotter // signals when snapshotter is ready
 
 	snapCount uint64
 	transport *rafthttp.Transport
+	// TODO 这三个chan还没懂是传递哪些消息的
 	stopc     chan struct{} // signals proposal channel closed
 	httpstopc chan struct{} // signals http server to shutdown
 	httpdonec chan struct{} // signals http server shutdown complete
@@ -207,22 +218,28 @@ func (rc *raftNode) publishEntries(ents []raftpb.Entry) (<-chan struct{}, bool) 
 }
 
 func (rc *raftNode) loadSnapshot() *raftpb.Snapshot {
+	// raft 有一个叫wal日志的东西，不会得看源论文把
+	// 如果之前有wal，从中加载snapshot出来
 	if wal.Exist(rc.waldir) {
+		// snapshot的entires存在wal文件里，现在从中拿出来valid的entries进行加载
 		walSnaps, err := wal.ValidSnapshotEntries(rc.logger, rc.waldir)
 		if err != nil {
 			log.Fatalf("raftexample: error listing snapshots (%v)", err)
 		}
+
 		snapshot, err := rc.snapshotter.LoadNewestAvailable(walSnaps)
 		if err != nil && err != snap.ErrNoSnapshot {
 			log.Fatalf("raftexample: error loading snapshot (%v)", err)
 		}
 		return snapshot
 	}
+	// 否则返回一个空的snapshot
 	return &raftpb.Snapshot{}
 }
 
 // openWAL returns a WAL ready for reading.
 func (rc *raftNode) openWAL(snapshot *raftpb.Snapshot) *wal.WAL {
+	// WAL 是持久化存储的逻辑表示
 	if !wal.Exist(rc.waldir) {
 		if err := os.Mkdir(rc.waldir, 0750); err != nil {
 			log.Fatalf("raftexample: cannot create dir for wal (%v)", err)
@@ -236,10 +253,12 @@ func (rc *raftNode) openWAL(snapshot *raftpb.Snapshot) *wal.WAL {
 	}
 
 	walsnap := walpb.Snapshot{}
+	// 如果有快照，就按snapshot的term和index开始读
 	if snapshot != nil {
 		walsnap.Index, walsnap.Term = snapshot.Metadata.Index, snapshot.Metadata.Term
 	}
 	log.Printf("loading WAL at term %d and index %d", walsnap.Term, walsnap.Index)
+	// walsnap加载
 	w, err := wal.Open(zap.NewExample(), rc.waldir, walsnap)
 	if err != nil {
 		log.Fatalf("raftexample: error loading wal (%v)", err)
@@ -252,15 +271,21 @@ func (rc *raftNode) openWAL(snapshot *raftpb.Snapshot) *wal.WAL {
 func (rc *raftNode) replayWAL() *wal.WAL {
 	log.Printf("replaying WAL of member %d", rc.id)
 	snapshot := rc.loadSnapshot()
+	// 先读取快照，然后用快照去wal中加载entries<--我猜的
 	w := rc.openWAL(snapshot)
+	// 读取了所有entries
 	_, st, ents, err := w.ReadAll()
 	if err != nil {
 		log.Fatalf("raftexample: failed to read WAL (%v)", err)
 	}
+	// 创建下raft的储存，其实是内存存储
 	rc.raftStorage = raft.NewMemoryStorage()
+	// 判断一下是否有快照需要应用，有的话，加到storage里
+	// 这里不是加载数据，而是只是记录snapshot
 	if snapshot != nil {
 		rc.raftStorage.ApplySnapshot(*snapshot)
 	}
+	// hardstate是需要持久化的数据，所以每次肯定需要通过加载的方式读取
 	rc.raftStorage.SetHardState(st)
 
 	// append to storage so raft starts at the right place in log
@@ -283,52 +308,64 @@ func (rc *raftNode) startRaft() {
 			log.Fatalf("raftexample: cannot create dir for snapshot (%v)", err)
 		}
 	}
+	// snap大概负责的是存log的一个行为
+	// 意思是将log存在着指定文件夹下
 	rc.snapshotter = snap.New(zap.NewExample(), rc.snapdir)
 
+	// 是否存在旧的wal
 	oldwal := wal.Exist(rc.waldir)
 	rc.wal = rc.replayWAL()
 
 	// signal replay has finished
-	rc.snapshotterReady <- rc.snapshotter
+	// 提醒下我创建好snapshotter了
+	rc.snapshotterReady <- rc.snapshotter // 这时候kvstore开始创建
 
 	rpeers := make([]raft.Peer, len(rc.peers))
 	for i := range rpeers {
 		rpeers[i] = raft.Peer{ID: uint64(i + 1)}
 	}
+	// 实际raft部分需要创建的config结构
 	c := &raft.Config{
 		ID:                        uint64(rc.id),
 		ElectionTick:              10,
 		HeartbeatTick:             1,
-		Storage:                   rc.raftStorage,
+		Storage:                   rc.raftStorage, // 之前加载的snapshot
 		MaxSizePerMsg:             1024 * 1024,
 		MaxInflightMsgs:           256,
 		MaxUncommittedEntriesSize: 1 << 30,
 	}
 
+	// 就是有旧的wal，说明这个node之前启动过，所以是restart
+	// 或者直接join字段指示是否为restart
+	// 这是是raft模块的，实际的raft启动
 	if oldwal || rc.join {
 		rc.node = raft.RestartNode(c)
 	} else {
 		rc.node = raft.StartNode(c, rpeers)
 	}
 
+	// 建立一个http通信，用于后续rpc吧
 	rc.transport = &rafthttp.Transport{
 		Logger:      rc.logger,
 		ID:          types.ID(rc.id),
 		ClusterID:   0x1000,
-		Raft:        rc,
+		Raft:        rc, // raft的状态机
 		ServerStats: stats.NewServerStats("", ""),
 		LeaderStats: stats.NewLeaderStats(zap.NewExample(), strconv.Itoa(rc.id)),
 		ErrorC:      make(chan error),
 	}
-
+	// 启动http，跟cluster中其他peer建立通信
 	rc.transport.Start()
 	for i := range rc.peers {
 		if i+1 != rc.id {
+			// local node跟其他所有peer建立连接（其实应该是一个注册逻辑）
 			rc.transport.AddPeer(types.ID(i+1), []string{rc.peers[i]})
 		}
 	}
-
+	// 异步的启动serve routine
+	// 启动local serve
 	go rc.serveRaft()
+
 	go rc.serveChannels()
 }
 
@@ -422,14 +459,17 @@ func (rc *raftNode) serveChannels() {
 	// send proposals over raft
 	go func() {
 		confChangeCount := uint64(0)
-
+		// 监听proposeC chan，收到写日志，进行处理
+		// 奥，and是因为：这个判断是保证两个通道都在正在工作
 		for rc.proposeC != nil && rc.confChangeC != nil {
+			// 同同时处理两种请求
 			select {
 			case prop, ok := <-rc.proposeC:
 				if !ok {
 					rc.proposeC = nil
 				} else {
 					// blocks until accepted by raft state machine
+					// 真正给到raft里（raft node是真正的raft层）
 					rc.node.Propose(context.TODO(), []byte(prop))
 				}
 
@@ -449,17 +489,26 @@ func (rc *raftNode) serveChannels() {
 
 	// event loop on raft state machine updates
 	for {
+		// 这里就涉及到raft中对外透出的接口的作用了，对之后raft代码阅读比较重要了
 		select {
 		case <-ticker.C:
+			// 使用ticker来当时钟，然后调用raft node的Tick()
+			// 应用层每次tick时需要调用该函数，将会由这里驱动raft的一些操作比如选举等
+			// 至于tick的单位是多少由应用层自己决定，只要保证是恒定时间都会来调用一次就好了
+			// 所以raft算法的时钟是逻辑时钟，通过应用层实现的
 			rc.node.Tick()
 
 		// store raft entries to wal, then publish over commit channel
+		// TODO 这个Ready()接口还是过于难了，等修炼修炼再研究
+		// 但理解了raft不提供真正的数据持久化储存是什么意思了
 		case rd := <-rc.node.Ready():
 			// Must save the snapshot file and WAL snapshot entry before saving any other entries
 			// or hardstate to ensure that recovery after a snapshot restore is possible.
+			// 查看是否有snapshot需要持久化保存
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				rc.saveSnap(rd.Snapshot)
 			}
+			// 将hardstate和entries进行持久化保存
 			rc.wal.Save(rd.HardState, rd.Entries)
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				rc.raftStorage.ApplySnapshot(rd.Snapshot)
@@ -474,11 +523,11 @@ func (rc *raftNode) serveChannels() {
 			}
 			rc.maybeTriggerSnapshot(applyDoneC)
 			rc.node.Advance()
-
+		// raft产生错误了
 		case err := <-rc.transport.ErrorC:
 			rc.writeError(err)
 			return
-
+		// 停止了
 		case <-rc.stopc:
 			rc.stop()
 			return
@@ -499,16 +548,20 @@ func (rc *raftNode) processMessages(ms []raftpb.Message) []raftpb.Message {
 }
 
 func (rc *raftNode) serveRaft() {
+	// 我懂了，他是把local node也放到这个数组里了
+	// 所以之前AddPeer有一个判断
+	// 拿到的是local的url
 	url, err := url.Parse(rc.peers[rc.id-1])
 	if err != nil {
 		log.Fatalf("raftexample: Failed parsing URL (%v)", err)
 	}
-
+	// 建立local node的监听TCPListener
 	ln, err := newStoppableListener(url.Host, rc.httpstopc)
 	if err != nil {
 		log.Fatalf("raftexample: Failed to listen rafthttp (%v)", err)
 	}
 
+	// 启动local的serve
 	err = (&http.Server{Handler: rc.transport.Handler()}).Serve(ln)
 	select {
 	case <-rc.httpstopc:

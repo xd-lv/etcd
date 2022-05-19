@@ -44,6 +44,9 @@ func main() {
 	commitC, errorC, snapshotterReady := newRaftNode(*id, strings.Split(*cluster, ","), *join, getSnapshot, proposeC, confChangeC)
 
 	// 拿到raft返回信息的commitC和errorC chan后，监听这两个chan
+	// TODO <-snapshotterReady,是指这个参数从这个chan拿，拿不到会阻塞
+	// 这样就实现了让raft加载一半以后，开始创建kv----太牛了吧学到了
+	// 但这是我猜的，但应该就是无缓冲区的chan的原理实现
 	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
 
 	// the key-value http handler will propose updates to raft
