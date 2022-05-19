@@ -522,6 +522,7 @@ func (rc *raftNode) serveChannels() {
 				return
 			}
 			rc.maybeTriggerSnapshot(applyDoneC)
+			// Advance函数是当使用者已经将上一次Ready数据处理之后，调用该函数告诉raft库可以进行下一步的操作
 			rc.node.Advance()
 		// raft产生错误了
 		case err := <-rc.transport.ErrorC:

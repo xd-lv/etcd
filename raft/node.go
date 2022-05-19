@@ -215,6 +215,9 @@ type Peer struct {
 // It appends a ConfChangeAddNode entry for each given peer to the initial log.
 //
 // Peers must not be zero length; call RestartNode in that case.
+// 这个接口是应用层创建一个新的raft node的开始
+// 其实思考一下就可以理解，把local node的config设置好，然后[]Peer的url，后面满足通信就行
+// 剩下初始化，都可以在raft内部实现了
 func StartNode(c *Config, peers []Peer) Node {
 	if len(peers) == 0 {
 		panic("no peers given; use RestartNode instead")
@@ -223,11 +226,16 @@ func StartNode(c *Config, peers []Peer) Node {
 	if err != nil {
 		panic(err)
 	}
+	// Bootstrap主要是启动一个全新的节点，然后添加peer
 	err = rn.Bootstrap(peers)
+	// 有err，就代表不是一个新的node，而是重新启动
+	// 但这个err不用处理，因为去掉了bootstrap就是restartnode方法，没有区别
 	if err != nil {
 		c.Logger.Warningf("error occurred during starting a new node: %v", err)
 	}
 
+	// 这好像是解决rawnode线程不安全的那个问题
+	// 每次先处理完了，然后在给到node
 	n := newNode(rn)
 
 	go n.run()
@@ -239,6 +247,7 @@ func StartNode(c *Config, peers []Peer) Node {
 // If the caller has an existing state machine, pass in the last log index that
 // has been applied to it; otherwise use zero.
 func RestartNode(c *Config) Node {
+	// 没有bootstrap的startnode方法
 	rn, err := NewRawNode(c)
 	if err != nil {
 		panic(err)
@@ -301,6 +310,8 @@ func (n *node) Stop() {
 }
 
 func (n *node) run() {
+	// 这几个变量都是中间量，都是tricky
+	// 这几个通道怎么不写清楚是传啥消息的啊，真气人
 	var propc chan msgWithResult
 	var readyc chan Ready
 	var advancec chan struct{}
@@ -310,10 +321,14 @@ func (n *node) run() {
 
 	lead := None
 
+	// TODO 这个raft核心逻辑也太难了，真没注释呗
 	for {
 		if advancec != nil {
+			// 收到了应用层的advance返回信息
 			readyc = nil
 		} else if n.rn.HasReady() {
+			// TODO 这是个什么情况呢？
+			//
 			// Populate a Ready. Note that this Ready is not guaranteed to
 			// actually be handled. We will arm readyc, but there's no guarantee
 			// that we will actually send on it. It's possible that we will
@@ -323,16 +338,20 @@ func (n *node) run() {
 			// it simplifies testing (by emitting less frequently and more
 			// predictably).
 			rd = n.rn.readyWithoutAccept()
+			// ready了，告诉应用层
 			readyc = n.readyc
 		}
 
 		if lead != r.lead {
+			// 当前node不是leader
 			if r.hasLeader() {
+				// 当前node是follower
 				if lead == None {
 					r.logger.Infof("raft.node: %x elected leader %x at term %d", r.id, r.lead, r.Term)
 				} else {
 					r.logger.Infof("raft.node: %x changed leader from %x to %x at term %d", r.id, lead, r.lead, r.Term)
 				}
+				// TODO 我感觉这里老难了
 				propc = n.propc
 			} else {
 				r.logger.Infof("raft.node: %x lost leader %x at term %d", r.id, lead, r.Term)
@@ -345,10 +364,18 @@ func (n *node) run() {
 		// TODO: maybe buffer the config propose if there exists one (the way
 		// described in raft dissertation)
 		// Currently it is dropped in Step silently.
+
+		// propc和recvc中拿到的是从上层应用传进来的消息
+		// 这个消息会被交给raft层的Step函数处理，具体处理逻辑我上面有过介绍。
 		case pm := <-propc:
+			// m 是 pb.Message
 			m := pm.m
+			// message 来自的nodeid
+			// 因为从propc读出来的，所以发送发肯定是这个raft
 			m.From = r.id
+			// 然后是raft，step来处理这个message
 			err := r.Step(m)
+
 			if pm.result != nil {
 				pm.result <- err
 				close(pm.result)
@@ -393,9 +420,11 @@ func (n *node) run() {
 			}
 		case <-n.tickc:
 			n.rn.Tick()
+			// 有需要应用层处理的数据
 		case readyc <- rd:
 			n.rn.acceptReady(rd)
 			advancec = n.advancec
+			// 应用层处理完数量
 		case <-advancec:
 			n.rn.Advance(rd)
 			rd = Ready{}

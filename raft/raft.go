@@ -113,6 +113,7 @@ func (st StateType) String() string {
 }
 
 // Config contains the parameters to start a raft.
+// 整个raft相关的设置
 type Config struct {
 	// ID is the identity of the local raft. ID cannot be 0.
 	ID uint64
@@ -240,6 +241,7 @@ func (c *Config) validate() error {
 	return nil
 }
 
+// 实现raft的结构体
 type raft struct {
 	id uint64
 
@@ -319,12 +321,17 @@ func newRaft(c *Config) *raft {
 	if err := c.validate(); err != nil {
 		panic(err.Error())
 	}
+
+	// 创建raft log
 	raftlog := newLogWithSize(c.Storage, c.Logger, c.MaxCommittedSizePerReady)
+
+	// 创建存储状态
 	hs, cs, err := c.Storage.InitialState()
 	if err != nil {
 		panic(err) // TODO(bdarnell)
 	}
 
+	// 创建真正的raft
 	r := &raft{
 		id:                        c.ID,
 		lead:                      None,
@@ -342,7 +349,9 @@ func newRaft(c *Config) *raft {
 		disableProposalForwarding: c.DisableProposalForwarding,
 	}
 
+	// TODO restore 还没懂是干什么的
 	cfg, prs, err := confchange.Restore(confchange.Changer{
+		// prs/trk 一个进程跟踪的，暂时先别管
 		Tracker:   r.prs,
 		LastIndex: raftlog.lastIndex(),
 	}, cs)
@@ -351,12 +360,15 @@ func newRaft(c *Config) *raft {
 	}
 	assertConfStatesEquivalent(r.logger, cs, r.switchToConfig(cfg, prs))
 
+	// 如果有hardstate，则加载
 	if !IsEmptyHardState(hs) {
 		r.loadState(hs)
 	}
+	// applied index 不为零，则加载进去
 	if c.Applied > 0 {
 		raftlog.appliedTo(c.Applied)
 	}
+	// 设置成follower
 	r.becomeFollower(r.Term, None)
 
 	var nodesStrs []string
@@ -844,6 +856,7 @@ func (r *raft) poll(id uint64, t pb.MessageType, v bool) (granted int, rejected 
 	return r.prs.TallyVotes()
 }
 
+// raft 的 Step 还是比价核心的一个方法
 func (r *raft) Step(m pb.Message) error {
 	// Handle the message term, which may result in our stepping down to a follower.
 	switch {
