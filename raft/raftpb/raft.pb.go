@@ -73,7 +73,7 @@ func (EntryType) EnumDescriptor() ([]byte, []int) {
 type MessageType int32
 
 const (
-	MsgHup            MessageType = 0
+	MsgHup            MessageType = 0 //不用于节点间通信，仅用于发送给本节点让本节点进行选举
 	MsgBeat           MessageType = 1
 	MsgProp           MessageType = 2
 	MsgApp            MessageType = 3

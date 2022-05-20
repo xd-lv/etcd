@@ -276,6 +276,7 @@ type raft struct {
 	// configuration change (if any). Config changes are only allowed to
 	// be proposed if the leader's applied index is greater than this
 	// value.
+	// TODO 太难了，没懂为啥。。
 	pendingConfIndex uint64
 	// an estimate of the size of the uncommitted tail of the Raft log. Used to
 	// prevent unbounded log growth. Only maintained by the leader. Reset on
@@ -288,6 +289,7 @@ type raft struct {
 	// or candidate.
 	// number of ticks since it reached last electionTimeout or received a
 	// valid message from current leader when it is a follower.
+	// 上一次选举超时到现在的时间
 	electionElapsed int
 
 	// number of ticks since it reached last heartbeatTimeout.
@@ -600,6 +602,8 @@ func (r *raft) maybeCommit() bool {
 }
 
 func (r *raft) reset(term uint64) {
+	// 就是一个刷新过程，东西太多了，慢慢细看吧
+	// TODO 挨个看一下
 	if r.Term != term {
 		r.Term = term
 		r.Vote = None
@@ -654,11 +658,13 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 }
 
 // tickElection is run by followers and candidates after r.electionTimeout.
+// 如果是follower，这时候如果应用层tick了，证明超时了，那就该选举了
 func (r *raft) tickElection() {
 	r.electionElapsed++
-
+	// promotable 判断是否可以选举
 	if r.promotable() && r.pastElectionTimeout() {
-		r.electionElapsed = 0
+		r.electionElapsed = 0 // 从上一次选举时间到现在，所有选举的时候肯定要归零初始化
+		// MsgHup 不用于节点间通信，仅用于发送给本节点让本节点进行选举
 		if err := r.Step(pb.Message{From: r.id, Type: pb.MsgHup}); err != nil {
 			r.logger.Debugf("error occurred during election: %v", err)
 		}
@@ -704,19 +710,25 @@ func (r *raft) becomeFollower(term uint64, lead uint64) {
 	r.logger.Infof("%x became follower at term %d", r.id, r.Term)
 }
 
+// 正常的成为candidate的步骤
 func (r *raft) becomeCandidate() {
 	// TODO(xiangli) remove the panic when the raft implementation is stable
 	if r.state == StateLeader {
 		panic("invalid transition [leader -> candidate]")
 	}
 	r.step = stepCandidate
+	// 成为candidate，term++，来到自己的时代
 	r.reset(r.Term + 1)
+	// 更新tick方法（tick的时候，应该赶candidate的事了）
 	r.tick = r.tickElection
+	// 将选票投给自己
 	r.Vote = r.id
+	// 更新状态，目前是candidate状态
 	r.state = StateCandidate
 	r.logger.Infof("%x became candidate at term %d", r.id, r.Term)
 }
 
+// 应该是对应网络分区时，无限制的重新选举，不停term++的情况
 func (r *raft) becomePreCandidate() {
 	// TODO(xiangli) remove the panic when the raft implementation is stable
 	if r.state == StateLeader {
@@ -738,15 +750,18 @@ func (r *raft) becomeLeader() {
 	if r.state == StateFollower {
 		panic("invalid transition [follower -> leader]")
 	}
-	r.step = stepLeader
+	r.step = stepLeader // step方法换成了 stepleader，该干leader的事了
 	r.reset(r.Term)
+	// 之后再收到tick，就该发heartbeat了
 	r.tick = r.tickHeartbeat
+	// 将lead更新为自己
 	r.lead = r.id
 	r.state = StateLeader
 	// Followers enter replicate mode when they've been successfully probed
 	// (perhaps after having received a snapshot as a result). The leader is
 	// trivially in this state. Note that r.reset() has initialized this
 	// progress with the last index already.
+	// progress状态机改为可以复制日志状态
 	r.prs.Progress[r.id].BecomeReplicate()
 
 	// Conservatively set the pendingConfIndex to the last index in the
@@ -754,6 +769,8 @@ func (r *raft) becomeLeader() {
 	// safe to delay any future proposals until we commit all our
 	// pending log entries, and scanning the entire tail of the log
 	// could be expensive.
+	// TODO 还没动这个参数的作用
+	// 但应该是为了现在configchange的
 	r.pendingConfIndex = r.raftLog.lastIndex()
 
 	emptyEnt := pb.Entry{Data: nil}
@@ -770,11 +787,12 @@ func (r *raft) becomeLeader() {
 }
 
 func (r *raft) hup(t CampaignType) {
+	// 虽然能理解，但不懂为啥会出现这种情况？
 	if r.state == StateLeader {
 		r.logger.Debugf("%x ignoring MsgHup because already leader", r.id)
 		return
 	}
-
+	// 判断下是否可以参与选举
 	if !r.promotable() {
 		r.logger.Warningf("%x is unpromotable and can not campaign", r.id)
 		return
@@ -784,6 +802,9 @@ func (r *raft) hup(t CampaignType) {
 		r.logger.Panicf("unexpected error getting unapplied entries (%v)", err)
 	}
 	if n := numOfPendingConf(ents); n != 0 && r.raftLog.committed > r.raftLog.applied {
+		// 涉及到raft算法了
+		// 也就是有一部分commited但还没applied的数据 就不可以竞选leader
+		// TODO 还没懂，之后再研究把
 		r.logger.Warningf("%x cannot campaign at term %d since there are still %d pending configuration changes to apply", r.id, r.Term, n)
 		return
 	}
@@ -798,6 +819,7 @@ func (r *raft) campaign(t CampaignType) {
 	if !r.promotable() {
 		// This path should not be hit (callers are supposed to check), but
 		// better safe than sorry.
+		// 就是这个检查了好几遍了，但是为了更安全就再查一遍
 		r.logger.Warningf("%x is unpromotable; campaign() should have been called", r.id)
 	}
 	var term uint64
@@ -808,16 +830,23 @@ func (r *raft) campaign(t CampaignType) {
 		// PreVote RPCs are sent for the next term before we've incremented r.Term.
 		term = r.Term + 1
 	} else {
+		// 更新raft到candidate
 		r.becomeCandidate()
 		voteMsg = pb.MsgVote
 		term = r.Term
 	}
+	// 选举胜利的，干这些事
+	// poll ： 选票的，这里就是自己给自己投了一票
 	if _, _, res := r.poll(r.id, voteRespMsgType(voteMsg), true); res == quorum.VoteWon {
 		// We won the election after voting for ourselves (which must mean that
 		// this is a single-node cluster). Advance to the next state.
+		// 也就是单节点cluster能进到这里hhhh
 		if t == campaignPreElection {
+			// 这怎么还有个小tricky，我真累了
 			r.campaign(campaignElection)
 		} else {
+			// 成为了leader
+			// 我觉得这里得触发一些信息
 			r.becomeLeader()
 		}
 		return
@@ -848,15 +877,19 @@ func (r *raft) campaign(t CampaignType) {
 
 func (r *raft) poll(id uint64, t pb.MessageType, v bool) (granted int, rejected int, result quorum.VoteResult) {
 	if v {
+		// 得到vote
 		r.logger.Infof("%x received %s from %x at term %d", r.id, t, id, r.Term)
 	} else {
+		// 没得到vote
 		r.logger.Infof("%x received %s rejection from %x at term %d", r.id, t, id, r.Term)
 	}
+	// 记录其他id对自己vote的情况（存在prs中
 	r.prs.RecordVote(id, v)
+	// 返回同意数，拒绝数，以及目前的选举进度（三种状态）
 	return r.prs.TallyVotes()
 }
 
-// raft 的 Step 还是比价核心的一个方法
+// raft 的 Step 还是比较核心的一个方法
 func (r *raft) Step(m pb.Message) error {
 	// Handle the message term, which may result in our stepping down to a follower.
 	switch {
@@ -1629,7 +1662,9 @@ func (r *raft) restore(s pb.Snapshot) bool {
 // promotable indicates whether state machine can be promoted to leader,
 // which is true when its own id is in progress list.
 func (r *raft) promotable() bool {
+	// TODO 在这个progress里才行，但这个progress是什么 learner又是什么
 	pr := r.prs.Progress[r.id]
+
 	return pr != nil && !pr.IsLearner && !r.raftLog.hasPendingSnapshot()
 }
 
@@ -1724,6 +1759,8 @@ func (r *raft) loadState(state pb.HardState) {
 // pastElectionTimeout returns true iff r.electionElapsed is greater
 // than or equal to the randomized election timeout in
 // [electiontimeout, 2 * electiontimeout - 1].
+// 这个措施好像是为了，不让所有follower都同时选举，那这样错误的概率太大
+// 加一个随机数，这样就可以差异化选举了
 func (r *raft) pastElectionTimeout() bool {
 	return r.electionElapsed >= r.randomizedElectionTimeout
 }
@@ -1793,6 +1830,7 @@ func (r *raft) increaseUncommittedSize(ents []pb.Entry) bool {
 
 // reduceUncommittedSize accounts for the newly committed entries by decreasing
 // the uncommitted entry size limit.
+// TODO 我真服了，这又是干啥的啊
 func (r *raft) reduceUncommittedSize(ents []pb.Entry) {
 	if r.uncommittedSize == 0 {
 		// Fast-path for followers, who do not track or enforce the limit.

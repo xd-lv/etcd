@@ -57,6 +57,7 @@ func NewRawNode(config *Config) (*RawNode, error) {
 
 // Tick advances the internal logical clock by a single tick.
 func (rn *RawNode) Tick() {
+	// raft 在不同角色中，tick()是不同的
 	rn.raft.tick()
 }
 

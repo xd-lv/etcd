@@ -419,6 +419,7 @@ func (n *node) run() {
 			case <-n.done:
 			}
 		case <-n.tickc:
+			// 周期性时钟
 			n.rn.Tick()
 			// 有需要应用层处理的数据
 		case readyc <- rd:
@@ -442,7 +443,7 @@ func (n *node) run() {
 // and heartbeat timeouts are in units of ticks.
 func (n *node) Tick() {
 	select {
-	case n.tickc <- struct{}{}:
+	case n.tickc <- struct{}{}: // 就是有一次tick，将信息传入tickc，就该有对应的操作
 	case <-n.done:
 	default:
 		n.rn.raft.logger.Warningf("%x A tick missed to fire. Node blocks too long!", n.rn.raft.id)
